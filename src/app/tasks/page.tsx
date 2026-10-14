@@ -10,22 +10,25 @@ type Task = {
   title: string;
   description: string | null;
   is_done: boolean;
-  priority: string;
+  priority: number;
   due_date: string | null;
   created_at: string;
+  remind_at: string | null;
+  tags: string[] | null;
+  is_archived: boolean;
 };
 
 type TaskDraft = {
   title: string;
   description: string;
-  priority: string;
+  priority: number;
   due_date: string;
 };
 
 const emptyDraft: TaskDraft = {
   title: "",
   description: "",
-  priority: "medium",
+  priority: 3,
   due_date: "",
 };
 
@@ -52,25 +55,21 @@ function formatDate(value: string | null) {
   }).format(date);
 }
 
-function priorityLabel(priority: string) {
-  const labels: Record<string, string> = {
-    low: "低",
-    medium: "中",
-    high: "高",
-  };
-
-  return labels[priority.toLowerCase()] ?? priority;
+function priorityColorClass(priority: number) {
+  if (priority <= 2) {
+    return "text-slate-400";
+  }
+  if (priority === 3) {
+    return "text-blue-400";
+  }
+  if (priority === 4) {
+    return "text-purple-400";
+  }
+  return "text-amber-300";
 }
 
-function priorityBadgeClass(priority: string) {
-  const styles: Record<string, string> = {
-    high: "border-red-500/50 bg-red-500/20 text-red-300 shadow-[0_0_12px_rgba(239,68,68,0.2)]",
-    medium:
-      "border-amber-400/50 bg-amber-400/15 text-amber-200 shadow-[0_0_12px_rgba(251,191,36,0.18)]",
-    low: "border-cyan-400/50 bg-cyan-400/15 text-cyan-200 shadow-[0_0_12px_rgba(34,211,238,0.18)]",
-  };
-
-  return styles[priority.toLowerCase()] ?? styles.medium;
+function priorityStars(priority: number) {
+  return `${"★".repeat(priority)}${"☆".repeat(5 - priority)}`;
 }
 
 function TaskForm({
@@ -141,25 +140,33 @@ function TaskForm({
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2">
-        <div>
-          <label
-            className="mb-1.5 block text-sm font-medium text-purple-100"
-            htmlFor={`${idPrefix}-priority`}
-          >
+        <fieldset>
+          <legend className="mb-1.5 block text-sm font-medium text-purple-100">
             优先级
-          </label>
-          <select
-            className={inputClassName}
-            disabled={isSubmitting}
-            id={`${idPrefix}-priority`}
-            onChange={(event) => updateDraft("priority", event.target.value)}
-            value={draft.priority}
+          </legend>
+          <div
+            aria-label="优先级星级"
+            className="flex items-center gap-1"
+            role="group"
           >
-            <option value="low">低</option>
-            <option value="medium">中</option>
-            <option value="high">高</option>
-          </select>
-        </div>
+            {Array.from({ length: 5 }, (_, index) => {
+              const rating = index + 1;
+              return (
+                <button
+                  aria-label={`${rating} 星`}
+                  aria-pressed={draft.priority === rating}
+                  className={`rounded px-0.5 text-2xl leading-none transition hover:scale-110 focus:outline-none focus:ring-2 focus:ring-purple-400 disabled:cursor-not-allowed disabled:opacity-60 ${priorityColorClass(draft.priority)}`}
+                  disabled={isSubmitting}
+                  key={rating}
+                  onClick={() => updateDraft("priority", rating)}
+                  type="button"
+                >
+                  {rating <= draft.priority ? "★" : "☆"}
+                </button>
+              );
+            })}
+          </div>
+        </fieldset>
 
         <div>
           <label
@@ -236,7 +243,7 @@ export default function TasksPage() {
         const { data, error } = await supabase
           .from("tasks")
           .select(
-            "id, title, description, is_done, priority, due_date, created_at",
+            "id, title, description, is_done, priority, due_date, created_at, remind_at, tags, is_archived",
           )
           .eq("user_id", user.id)
           .order("created_at", { ascending: false });
@@ -302,7 +309,9 @@ export default function TasksPage() {
   ) {
     const { data, error } = await supabase
       .from("tasks")
-      .select("id, title, description, is_done, priority, due_date, created_at")
+      .select(
+        "id, title, description, is_done, priority, due_date, created_at, remind_at, tags, is_archived",
+      )
       .eq("user_id", ownerId)
       .order("created_at", { ascending: false });
 
@@ -582,8 +591,11 @@ export default function TasksPage() {
                     <dl className="mt-5 flex flex-wrap gap-x-6 gap-y-3 border-t border-white/10 pt-4 text-sm">
                       <div className="flex gap-2">
                         <dt className="text-slate-400">优先级</dt>
-                        <dd className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${priorityBadgeClass(task.priority)}`}>
-                          {priorityLabel(task.priority)}
+                        <dd
+                          aria-label={`优先级 ${task.priority} 星`}
+                          className={`text-lg leading-none ${priorityColorClass(task.priority)}`}
+                        >
+                          {priorityStars(task.priority)}
                         </dd>
                       </div>
                       <div className="flex gap-2">
