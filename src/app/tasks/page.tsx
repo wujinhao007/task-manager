@@ -29,6 +29,8 @@ type Subtask = {
   task_id: string | number;
   title: string;
   description: string | null;
+  priority: number;
+  due_date: string | null;
   is_done: boolean;
   created_at: string;
 };
@@ -36,8 +38,11 @@ type Subtask = {
 type SubtaskDraft = {
   title: string;
   description: string;
+  priority: number;
+  due_date: string;
 };
 
+type SubtaskSortOrder = "created-asc" | "due-asc" | "priority-desc";
 type TaskDraft = {
   title: string;
   description: string;
@@ -99,6 +104,67 @@ function priorityColorClass(priority: number) {
 
 function priorityStars(priority: number) {
   return `${"★".repeat(priority)}${"☆".repeat(5 - priority)}`;
+}
+
+function Stars({ priority }: { priority: number }) {
+  return (
+    <span
+      aria-label={`优先级 ${priority} 星`}
+      className={`text-sm leading-none ${priorityColorClass(priority)}`}
+    >
+      {priorityStars(priority)}
+    </span>
+  );
+}
+
+function StarPicker({
+  priority,
+  onChange,
+  disabled,
+  compact = false,
+}: {
+  priority: number;
+  onChange: (priority: number) => void;
+  disabled: boolean;
+  compact?: boolean;
+}) {
+  return (
+    <div aria-label="优先级星级" className="flex items-center gap-1" role="group">
+      {Array.from({ length: 5 }, (_, index) => {
+        const rating = index + 1;
+        return (
+          <button
+            aria-label={`${rating} 星`}
+            aria-pressed={priority === rating}
+            className={`rounded px-0.5 leading-none transition hover:scale-110 focus:outline-none focus:ring-2 focus:ring-purple-400 disabled:cursor-not-allowed disabled:opacity-60 ${
+              compact ? "text-lg" : "text-2xl"
+            } ${priorityColorClass(priority)}`}
+            disabled={disabled}
+            key={rating}
+            onClick={() => onChange(rating)}
+            type="button"
+          >
+            {rating <= priority ? "★" : "☆"}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function isDatePast(value: string | null) {
+  if (!value) {
+    return false;
+  }
+
+  const today = new Date();
+  const todayValue = [
+    today.getFullYear(),
+    String(today.getMonth() + 1).padStart(2, "0"),
+    String(today.getDate()).padStart(2, "0"),
+  ].join("-");
+
+  return value < todayValue;
 }
 
 function TaskForm({
@@ -173,28 +239,11 @@ function TaskForm({
           <legend className="mb-1.5 block text-sm font-medium text-purple-100">
             优先级
           </legend>
-          <div
-            aria-label="优先级星级"
-            className="flex items-center gap-1"
-            role="group"
-          >
-            {Array.from({ length: 5 }, (_, index) => {
-              const rating = index + 1;
-              return (
-                <button
-                  aria-label={`${rating} 星`}
-                  aria-pressed={draft.priority === rating}
-                  className={`rounded px-0.5 text-2xl leading-none transition hover:scale-110 focus:outline-none focus:ring-2 focus:ring-purple-400 disabled:cursor-not-allowed disabled:opacity-60 ${priorityColorClass(draft.priority)}`}
-                  disabled={isSubmitting}
-                  key={rating}
-                  onClick={() => updateDraft("priority", rating)}
-                  type="button"
-                >
-                  {rating <= draft.priority ? "★" : "☆"}
-                </button>
-              );
-            })}
-          </div>
+          <StarPicker
+            disabled={isSubmitting}
+            onChange={(priority) => updateDraft("priority", priority)}
+            priority={draft.priority}
+          />
         </fieldset>
 
         <div>
@@ -255,7 +304,15 @@ export default function TasksPage() {
     null,
   );
   const [editingSubtaskDraft, setEditingSubtaskDraft] =
-    useState<SubtaskDraft>({ title: "", description: "" });
+    useState<SubtaskDraft>({
+      title: "",
+      description: "",
+      priority: 3,
+      due_date: "",
+    });
+  const [subtaskSortOrders, setSubtaskSortOrders] = useState<
+    Record<string, SubtaskSortOrder>
+  >({});
   const [addingSubtaskTaskIds, setAddingSubtaskTaskIds] = useState<Set<string>>(
     new Set(),
   );
@@ -630,6 +687,16 @@ export default function TasksPage() {
     });
   }
 
+  function toggleAllSubtasksExpanded() {
+    const allExpanded =
+      tasks.length > 0 &&
+      tasks.every((task) => expandedTaskIds.has(String(task.id)));
+
+    setExpandedTaskIds(
+      allExpanded ? new Set() : new Set(tasks.map((task) => String(task.id))),
+    );
+  }
+
   async function addSubtask(task: Task) {
     const taskKey = String(task.id);
     const title = (subtaskDrafts[taskKey] ?? "").trim();
@@ -645,7 +712,13 @@ export default function TasksPage() {
       await getVerifiedUser(supabase);
       const { data, error } = await supabase
         .from("subtasks")
-        .insert({ task_id: task.id, title, is_done: false })
+        .insert({
+          task_id: task.id,
+          title,
+          is_done: false,
+          priority: 3,
+          due_date: null,
+        })
         .select("*")
         .single();
 
@@ -730,12 +803,19 @@ export default function TasksPage() {
     setEditingSubtaskDraft({
       title: subtask.title,
       description: subtask.description ?? "",
+      priority: subtask.priority ?? 3,
+      due_date: subtask.due_date ?? "",
     });
   }
 
   function cancelEditingSubtask() {
     setEditingSubtaskKey(null);
-    setEditingSubtaskDraft({ title: "", description: "" });
+    setEditingSubtaskDraft({
+      title: "",
+      description: "",
+      priority: 3,
+      due_date: "",
+    });
   }
 
   async function saveSubtask(task: Task, subtask: Subtask) {
@@ -743,6 +823,8 @@ export default function TasksPage() {
     const subtaskKey = `${taskKey}:${String(subtask.id)}`;
     const title = editingSubtaskDraft.title.trim();
     const description = editingSubtaskDraft.description.trim() || null;
+    const priority = editingSubtaskDraft.priority;
+    const due_date = editingSubtaskDraft.due_date || null;
 
     if (!title) {
       addToast("error", "子任务标题不能为空。");
@@ -756,7 +838,7 @@ export default function TasksPage() {
       await getVerifiedUser(supabase);
       const { data, error } = await supabase
         .from("subtasks")
-        .update({ title, description })
+        .update({ title, description, priority, due_date })
         .eq("id", subtask.id)
         .eq("task_id", task.id)
         .select("id")
@@ -774,7 +856,7 @@ export default function TasksPage() {
         ...current,
         [taskKey]: (current[taskKey] ?? []).map((currentSubtask) =>
           currentSubtask.id === subtask.id
-            ? { ...currentSubtask, title, description }
+            ? { ...currentSubtask, title, description, priority, due_date }
             : currentSubtask,
         ),
       }));
@@ -950,14 +1032,29 @@ export default function TasksPage() {
             <label className="sr-only" htmlFor="task-search">
               搜索任务标题或描述
             </label>
-            <input
-              className={`${inputClassName} mt-4 sm:max-w-md`}
-              id="task-search"
-              onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="搜索任务标题或描述…"
-              type="search"
-              value={searchQuery}
-            />
+            <div className="mt-4 flex flex-col gap-2 sm:max-w-xl sm:flex-row">
+              <input
+                className={`${inputClassName} min-w-0 flex-1`}
+                id="task-search"
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="搜索任务标题或描述…"
+                type="search"
+                value={searchQuery}
+              />
+              <button
+                className={`${buttonClassName} shrink-0 border border-purple-300/25 bg-purple-500/10 px-3 text-xs text-purple-100 hover:bg-purple-500/20`}
+                disabled={tasks.length === 0}
+                onClick={toggleAllSubtasksExpanded}
+                type="button"
+              >
+                {tasks.length > 0 &&
+                tasks.every((task) =>
+                  expandedTaskIds.has(String(task.id)),
+                )
+                  ? "收起全部"
+                  : "展开全部"}
+              </button>
+            </div>
           </div>
           <LogoutButton />
         </header>
@@ -1119,6 +1216,21 @@ export default function TasksPage() {
                   (updatingTaskId === task.id || deletingTaskId === task.id);
                 const taskKey = String(task.id);
                 const subtasks = subtasksByTask[taskKey] ?? [];
+                const subtaskSortOrder =
+                  subtaskSortOrders[taskKey] ?? "created-asc";
+                const sortedSubtasks = [...subtasks].sort((a, b) => {
+                  switch (subtaskSortOrder) {
+                    case "due-asc":
+                      if (!a.due_date) return b.due_date ? 1 : 0;
+                      if (!b.due_date) return -1;
+                      return a.due_date.localeCompare(b.due_date);
+                    case "priority-desc":
+                      return b.priority - a.priority;
+                    case "created-asc":
+                    default:
+                      return Date.parse(a.created_at) - Date.parse(b.created_at);
+                  }
+                });
                 const completedSubtasks = subtasks.filter(
                   (subtask) => subtask.is_done,
                 ).length;
@@ -1236,13 +1348,42 @@ export default function TasksPage() {
 
                       {isSubtasksExpanded && (
                         <div className="mt-4 rounded-xl border border-white/5 bg-slate-950/30 p-4 pl-5">
+                          <div className="mb-3 flex flex-wrap items-center gap-2">
+                            <span className="text-xs text-slate-500">排序</span>
+                            {(
+                              [
+                                ["created-asc", "按创建时间"],
+                                ["due-asc", "按截止日期"],
+                                ["priority-desc", "按优先级"],
+                              ] as const
+                            ).map(([value, label]) => (
+                              <button
+                                aria-pressed={subtaskSortOrder === value}
+                                className={`${buttonClassName} border px-2.5 py-1 text-xs ${
+                                  subtaskSortOrder === value
+                                    ? "border-fuchsia-300/40 bg-purple-500/20 text-white"
+                                    : "border-white/10 bg-white/5 text-slate-400 hover:bg-white/10"
+                                }`}
+                                key={value}
+                                onClick={() =>
+                                  setSubtaskSortOrders((current) => ({
+                                    ...current,
+                                    [taskKey]: value,
+                                  }))
+                                }
+                                type="button"
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
                           <div className="space-y-3 border-l-2 border-purple-400/30 pl-4">
                             {subtasks.length === 0 ? (
                               <p className="py-1 text-sm text-slate-500">
                                 还没有子任务。
                               </p>
                             ) : (
-                              subtasks.map((subtask) => {
+                              sortedSubtasks.map((subtask) => {
                                 const subtaskBusyKey = `${taskKey}:${String(subtask.id)}`;
                                 const isSubtaskBusy =
                                   busySubtaskIds.has(subtaskBusyKey);
@@ -1324,6 +1465,47 @@ export default function TasksPage() {
                                               editingSubtaskDraft.description
                                             }
                                           />
+                                          <div className="flex flex-wrap items-center justify-between gap-3">
+                                            <StarPicker
+                                              compact
+                                              disabled={isSubtaskBusy}
+                                              onChange={(priority) =>
+                                                setEditingSubtaskDraft(
+                                                  (current) => ({
+                                                    ...current,
+                                                    priority,
+                                                  }),
+                                                )
+                                              }
+                                              priority={
+                                                editingSubtaskDraft.priority
+                                              }
+                                            />
+                                            <label
+                                              className="sr-only"
+                                              htmlFor={`${subtaskBusyKey}-due-date`}
+                                            >
+                                              子任务截止日期
+                                            </label>
+                                            <input
+                                              className={`${inputClassName} w-auto min-w-36 px-2 py-1.5 text-xs`}
+                                              disabled={isSubtaskBusy}
+                                              id={`${subtaskBusyKey}-due-date`}
+                                              onChange={(event) =>
+                                                setEditingSubtaskDraft(
+                                                  (current) => ({
+                                                    ...current,
+                                                    due_date:
+                                                      event.target.value,
+                                                  }),
+                                                )
+                                              }
+                                              type="date"
+                                              value={
+                                                editingSubtaskDraft.due_date
+                                              }
+                                            />
+                                          </div>
                                         </div>
                                         <div className="flex shrink-0 gap-2">
                                           <button
@@ -1348,15 +1530,32 @@ export default function TasksPage() {
                                     ) : (
                                       <>
                                         <div className="min-w-0 flex-1">
-                                          <p
-                                            className={`break-words text-sm ${
-                                              subtask.is_done
-                                                ? "text-slate-500 line-through"
-                                                : "text-slate-200"
-                                            }`}
-                                          >
-                                            {subtask.title}
-                                          </p>
+                                          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+                                            <p
+                                              className={`min-w-0 break-words text-sm ${
+                                                subtask.is_done
+                                                  ? "text-slate-500 line-through"
+                                                  : "text-slate-200"
+                                              }`}
+                                            >
+                                              {subtask.title}
+                                            </p>
+                                            <Stars
+                                              priority={subtask.priority ?? 3}
+                                            />
+                                            {subtask.due_date && (
+                                              <span
+                                                className={`text-xs ${
+                                                  !subtask.is_done &&
+                                                  isDatePast(subtask.due_date)
+                                                    ? "text-red-300"
+                                                    : "text-slate-500"
+                                                }`}
+                                              >
+                                                {formatDate(subtask.due_date)}
+                                              </span>
+                                            )}
+                                          </div>
                                           {subtask.description && (
                                             <p
                                               className="mt-0.5 truncate text-xs text-slate-500"
