@@ -24,6 +24,20 @@ type Task = {
   is_archived: boolean;
 };
 
+type Subtask = {
+  id: string | number;
+  task_id: string | number;
+  title: string;
+  description: string | null;
+  is_done: boolean;
+  created_at: string;
+};
+
+type SubtaskDraft = {
+  title: string;
+  description: string;
+};
+
 type TaskDraft = {
   title: string;
   description: string;
@@ -227,6 +241,24 @@ function TaskForm({
 export default function TasksPage() {
   const router = useRouter();
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [subtasksByTask, setSubtasksByTask] = useState<
+    Record<string, Subtask[]>
+  >({});
+  const [expandedTaskIds, setExpandedTaskIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [subtaskDrafts, setSubtaskDrafts] = useState<Record<string, string>>(
+    {},
+  );
+  const [busySubtaskIds, setBusySubtaskIds] = useState<Set<string>>(new Set());
+  const [editingSubtaskKey, setEditingSubtaskKey] = useState<string | null>(
+    null,
+  );
+  const [editingSubtaskDraft, setEditingSubtaskDraft] =
+    useState<SubtaskDraft>({ title: "", description: "" });
+  const [addingSubtaskTaskIds, setAddingSubtaskTaskIds] = useState<Set<string>>(
+    new Set(),
+  );
   const [userId, setUserId] = useState("");
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [taskToDelete, setTaskToDelete] = useState<Task | null>(null);
@@ -317,9 +349,38 @@ export default function TasksPage() {
           throw error;
         }
 
+        const loadedTasks = data ?? [];
+
         if (isActive) {
           setUserId(user.id);
-          setTasks(data ?? []);
+          setTasks(loadedTasks);
+        }
+
+        if (loadedTasks.length > 0) {
+          const { data: subtaskData, error: subtaskError } = await supabase
+            .from("subtasks")
+            .select("*")
+            .in(
+              "task_id",
+              loadedTasks.map((task) => task.id),
+            );
+
+          if (subtaskError) {
+            throw subtaskError;
+          }
+
+          if (isActive) {
+            const groupedSubtasks = (subtaskData ?? []).reduce<
+              Record<string, Subtask[]>
+            >((groups, subtask) => {
+              const taskKey = String(subtask.task_id);
+              (groups[taskKey] ??= []).push(subtask);
+              return groups;
+            }, {});
+            setSubtasksByTask(groupedSubtasks);
+          }
+        } else if (isActive) {
+          setSubtasksByTask({});
         }
       } catch (error) {
         if (isActive) {
@@ -556,23 +617,263 @@ export default function TasksPage() {
     await deleteTask(task);
   }
 
+  function toggleSubtasksExpanded(taskId: Task["id"]) {
+    const taskKey = String(taskId);
+    setExpandedTaskIds((current) => {
+      const next = new Set(current);
+      if (next.has(taskKey)) {
+        next.delete(taskKey);
+      } else {
+        next.add(taskKey);
+      }
+      return next;
+    });
+  }
+
+  async function addSubtask(task: Task) {
+    const taskKey = String(task.id);
+    const title = (subtaskDrafts[taskKey] ?? "").trim();
+    if (!title) {
+      addToast("error", "子任务标题不能为空。");
+      return;
+    }
+
+    setAddingSubtaskTaskIds((current) => new Set(current).add(taskKey));
+
+    try {
+      const supabase = createBrowserSupabaseClient();
+      await getVerifiedUser(supabase);
+      const { data, error } = await supabase
+        .from("subtasks")
+        .insert({ task_id: task.id, title, is_done: false })
+        .select("*")
+        .single();
+
+      if (error) {
+        throw error;
+      }
+
+      setSubtasksByTask((current) => ({
+        ...current,
+        [taskKey]: [...(current[taskKey] ?? []), data],
+      }));
+      setSubtaskDrafts((current) => ({ ...current, [taskKey]: "" }));
+      addToast("success", "子任务已添加。");
+    } catch (error) {
+      addToast(
+        "error",
+        error instanceof Error ? error.message : "添加子任务失败，请稍后重试。",
+      );
+    } finally {
+      setAddingSubtaskTaskIds((current) => {
+        const next = new Set(current);
+        next.delete(taskKey);
+        return next;
+      });
+    }
+  }
+
+  async function toggleSubtask(task: Task, subtask: Subtask) {
+    const taskKey = String(task.id);
+    const subtaskKey = `${taskKey}:${String(subtask.id)}`;
+    setBusySubtaskIds((current) => new Set(current).add(subtaskKey));
+
+    try {
+      const supabase = createBrowserSupabaseClient();
+      await getVerifiedUser(supabase);
+      const { data, error } = await supabase
+        .from("subtasks")
+        .update({ is_done: !subtask.is_done })
+        .eq("id", subtask.id)
+        .eq("task_id", task.id)
+        .select("id")
+        .maybeSingle();
+
+      if (error) {
+        throw error;
+      }
+
+      if (!data) {
+        throw new Error("子任务不存在，或你没有权限修改该子任务。");
+      }
+
+      setSubtasksByTask((current) => ({
+        ...current,
+        [taskKey]: (current[taskKey] ?? []).map((currentSubtask) =>
+          currentSubtask.id === subtask.id
+            ? { ...currentSubtask, is_done: !subtask.is_done }
+            : currentSubtask,
+        ),
+      }));
+      addToast(
+        "success",
+        subtask.is_done ? "子任务已标记为未完成。" : "子任务已完成。",
+      );
+    } catch (error) {
+      addToast(
+        "error",
+        error instanceof Error
+          ? error.message
+          : "更新子任务状态失败，请稍后重试。",
+      );
+    } finally {
+      setBusySubtaskIds((current) => {
+        const next = new Set(current);
+        next.delete(subtaskKey);
+        return next;
+      });
+    }
+  }
+
+  function startEditingSubtask(task: Task, subtask: Subtask) {
+    setEditingSubtaskKey(`${String(task.id)}:${String(subtask.id)}`);
+    setEditingSubtaskDraft({
+      title: subtask.title,
+      description: subtask.description ?? "",
+    });
+  }
+
+  function cancelEditingSubtask() {
+    setEditingSubtaskKey(null);
+    setEditingSubtaskDraft({ title: "", description: "" });
+  }
+
+  async function saveSubtask(task: Task, subtask: Subtask) {
+    const taskKey = String(task.id);
+    const subtaskKey = `${taskKey}:${String(subtask.id)}`;
+    const title = editingSubtaskDraft.title.trim();
+    const description = editingSubtaskDraft.description.trim() || null;
+
+    if (!title) {
+      addToast("error", "子任务标题不能为空。");
+      return;
+    }
+
+    setBusySubtaskIds((current) => new Set(current).add(subtaskKey));
+
+    try {
+      const supabase = createBrowserSupabaseClient();
+      await getVerifiedUser(supabase);
+      const { data, error } = await supabase
+        .from("subtasks")
+        .update({ title, description })
+        .eq("id", subtask.id)
+        .eq("task_id", task.id)
+        .select("id")
+        .maybeSingle();
+
+      if (error) {
+        throw error;
+      }
+
+      if (!data) {
+        throw new Error("子任务不存在，或你没有权限修改该子任务。");
+      }
+
+      setSubtasksByTask((current) => ({
+        ...current,
+        [taskKey]: (current[taskKey] ?? []).map((currentSubtask) =>
+          currentSubtask.id === subtask.id
+            ? { ...currentSubtask, title, description }
+            : currentSubtask,
+        ),
+      }));
+      cancelEditingSubtask();
+      addToast("success", "子任务已更新。");
+    } catch (error) {
+      addToast(
+        "error",
+        error instanceof Error ? error.message : "编辑子任务失败，请稍后重试。",
+      );
+    } finally {
+      setBusySubtaskIds((current) => {
+        const next = new Set(current);
+        next.delete(subtaskKey);
+        return next;
+      });
+    }
+  }
+
+  async function deleteSubtask(task: Task, subtask: Subtask) {
+    const taskKey = String(task.id);
+    const subtaskKey = `${taskKey}:${String(subtask.id)}`;
+    setBusySubtaskIds((current) => new Set(current).add(subtaskKey));
+
+    try {
+      const supabase = createBrowserSupabaseClient();
+      await getVerifiedUser(supabase);
+      const { data, error } = await supabase
+        .from("subtasks")
+        .delete()
+        .eq("id", subtask.id)
+        .eq("task_id", task.id)
+        .select("id")
+        .maybeSingle();
+
+      if (error) {
+        throw error;
+      }
+
+      if (!data) {
+        throw new Error("子任务不存在，或你没有权限删除该子任务。");
+      }
+
+      setSubtasksByTask((current) => ({
+        ...current,
+        [taskKey]: (current[taskKey] ?? []).filter(
+          (currentSubtask) => currentSubtask.id !== subtask.id,
+        ),
+      }));
+      addToast("success", "子任务已删除。");
+    } catch (error) {
+      addToast(
+        "error",
+        error instanceof Error ? error.message : "删除子任务失败，请稍后重试。",
+      );
+    } finally {
+      setBusySubtaskIds((current) => {
+        const next = new Set(current);
+        next.delete(subtaskKey);
+        return next;
+      });
+    }
+  }
+
   const isMutating =
     isSaving || updatingTaskId !== null || deletingTaskId !== null;
 
+  const searchTerm = searchQuery.trim().toLocaleLowerCase();
+  const matchingSubtaskTaskIds = new Set(
+    tasks
+      .filter((task) =>
+        (subtasksByTask[String(task.id)] ?? []).some(
+          (subtask) =>
+            subtask.title.toLocaleLowerCase().includes(searchTerm) ||
+            (subtask.description ?? "")
+              .toLocaleLowerCase()
+              .includes(searchTerm),
+        ),
+      )
+      .map((task) => String(task.id)),
+  );
+
   const visibleTasks = tasks
     .filter((task) => {
-      const query = searchQuery.trim().toLocaleLowerCase();
-      const matchesSearch =
-        !query ||
-        task.title.toLocaleLowerCase().includes(query) ||
-        (task.description ?? "").toLocaleLowerCase().includes(query);
+      const matchesTask =
+        !searchTerm ||
+        task.title.toLocaleLowerCase().includes(searchTerm) ||
+        (task.description ?? "").toLocaleLowerCase().includes(searchTerm);
+      const matchesSubtask =
+        !searchTerm || matchingSubtaskTaskIds.has(String(task.id));
       const matchesStatus =
         statusFilter === "all" ||
         (statusFilter === "done" ? task.is_done : !task.is_done);
       const matchesPriority =
         priorityFilter === null || task.priority === priorityFilter;
 
-      return matchesSearch && matchesStatus && matchesPriority;
+      return (
+        (matchesTask || matchesSubtask) && matchesStatus && matchesPriority
+      );
     })
     .sort((a, b) => {
       switch (sortOrder) {
@@ -816,6 +1117,25 @@ export default function TasksPage() {
                 const isTaskBusy =
                   isMutating &&
                   (updatingTaskId === task.id || deletingTaskId === task.id);
+                const taskKey = String(task.id);
+                const subtasks = subtasksByTask[taskKey] ?? [];
+                const completedSubtasks = subtasks.filter(
+                  (subtask) => subtask.is_done,
+                ).length;
+                const isAllSubtasksDone =
+                  subtasks.length > 0 &&
+                  completedSubtasks === subtasks.length;
+                const matchesParentSearch =
+                  !searchTerm ||
+                  task.title.toLocaleLowerCase().includes(searchTerm) ||
+                  (task.description ?? "")
+                    .toLocaleLowerCase()
+                    .includes(searchTerm);
+                const hasMatchingSubtask =
+                  Boolean(searchTerm) &&
+                  !matchesParentSearch &&
+                  matchingSubtaskTaskIds.has(taskKey);
+                const isSubtasksExpanded = expandedTaskIds.has(taskKey);
 
                 return (
                   <li
@@ -846,6 +1166,11 @@ export default function TasksPage() {
                           >
                             {task.title}
                           </h2>
+                          {hasMatchingSubtask && (
+                            <span className="mt-1 inline-flex rounded-full border border-fuchsia-300/30 bg-fuchsia-400/10 px-2 py-0.5 text-xs font-medium text-fuchsia-200">
+                              含匹配子任务
+                            </span>
+                          )}
                           <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-400">
                             {task.description || "暂无描述"}
                           </p>
@@ -886,6 +1211,232 @@ export default function TasksPage() {
                         </dd>
                       </div>
                     </dl>
+
+                    <div className="mt-4 border-t border-white/10 pt-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-medium text-slate-300">
+                            子任务 {completedSubtasks}/{subtasks.length}
+                          </p>
+                          {isAllSubtasksDone && (
+                            <span className="text-xs font-semibold text-emerald-300">
+                              ✓ 全部完成
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          aria-expanded={isSubtasksExpanded}
+                          className={`${buttonClassName} border border-purple-300/25 bg-purple-500/10 px-3 py-1.5 text-xs text-purple-100 hover:bg-purple-500/20`}
+                          onClick={() => toggleSubtasksExpanded(task.id)}
+                          type="button"
+                        >
+                          {isSubtasksExpanded ? "收起子任务" : "展开子任务"}
+                        </button>
+                      </div>
+
+                      {isSubtasksExpanded && (
+                        <div className="mt-4 rounded-xl border border-white/5 bg-slate-950/30 p-4 pl-5">
+                          <div className="space-y-3 border-l-2 border-purple-400/30 pl-4">
+                            {subtasks.length === 0 ? (
+                              <p className="py-1 text-sm text-slate-500">
+                                还没有子任务。
+                              </p>
+                            ) : (
+                              subtasks.map((subtask) => {
+                                const subtaskBusyKey = `${taskKey}:${String(subtask.id)}`;
+                                const isSubtaskBusy =
+                                  busySubtaskIds.has(subtaskBusyKey);
+                                const isEditingSubtask =
+                                  editingSubtaskKey === subtaskBusyKey;
+
+                                return (
+                                  <div
+                                    className="flex min-w-0 items-start gap-3"
+                                    key={subtask.id}
+                                  >
+                                    <input
+                                      aria-label={`标记子任务“${subtask.title}”${
+                                        subtask.is_done
+                                          ? "为未完成"
+                                          : "为已完成"
+                                      }`}
+                                      checked={subtask.is_done}
+                                      className="mt-2 h-4 w-4 shrink-0 rounded border-white/30 bg-slate-900/70 text-purple-500 focus:ring-purple-500 focus:ring-offset-slate-950 disabled:cursor-not-allowed disabled:opacity-50"
+                                      disabled={isSubtaskBusy || isEditingSubtask}
+                                      onChange={() =>
+                                        void toggleSubtask(task, subtask)
+                                      }
+                                      type="checkbox"
+                                    />
+                                    {isEditingSubtask ? (
+                                      <form
+                                        className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row sm:items-start"
+                                        onSubmit={(event) => {
+                                          event.preventDefault();
+                                          void saveSubtask(task, subtask);
+                                        }}
+                                      >
+                                        <div className="min-w-0 flex-1 space-y-2">
+                                          <label
+                                            className="sr-only"
+                                            htmlFor={`${subtaskBusyKey}-title`}
+                                          >
+                                            子任务标题
+                                          </label>
+                                          <input
+                                            className={inputClassName}
+                                            disabled={isSubtaskBusy}
+                                            id={`${subtaskBusyKey}-title`}
+                                            maxLength={200}
+                                            onChange={(event) =>
+                                              setEditingSubtaskDraft(
+                                                (current) => ({
+                                                  ...current,
+                                                  title: event.target.value,
+                                                }),
+                                              )
+                                            }
+                                            placeholder="子任务标题"
+                                            required
+                                            value={editingSubtaskDraft.title}
+                                          />
+                                          <label
+                                            className="sr-only"
+                                            htmlFor={`${subtaskBusyKey}-description`}
+                                          >
+                                            子任务描述
+                                          </label>
+                                          <input
+                                            className={inputClassName}
+                                            disabled={isSubtaskBusy}
+                                            id={`${subtaskBusyKey}-description`}
+                                            onChange={(event) =>
+                                              setEditingSubtaskDraft(
+                                                (current) => ({
+                                                  ...current,
+                                                  description:
+                                                    event.target.value,
+                                                }),
+                                              )
+                                            }
+                                            placeholder="子任务描述（可选）"
+                                            value={
+                                              editingSubtaskDraft.description
+                                            }
+                                          />
+                                        </div>
+                                        <div className="flex shrink-0 gap-2">
+                                          <button
+                                            className={`${buttonClassName} border border-emerald-400/30 bg-emerald-500/10 px-2.5 py-1 text-xs text-emerald-200 hover:bg-emerald-500/20`}
+                                            disabled={isSubtaskBusy}
+                                            type="submit"
+                                          >
+                                            {isSubtaskBusy
+                                              ? "正在保存…"
+                                              : "保存"}
+                                          </button>
+                                          <button
+                                            className={`${buttonClassName} border border-white/20 bg-white/5 px-2.5 py-1 text-xs text-slate-200 hover:bg-white/10`}
+                                            disabled={isSubtaskBusy}
+                                            onClick={cancelEditingSubtask}
+                                            type="button"
+                                          >
+                                            取消
+                                          </button>
+                                        </div>
+                                      </form>
+                                    ) : (
+                                      <>
+                                        <div className="min-w-0 flex-1">
+                                          <p
+                                            className={`break-words text-sm ${
+                                              subtask.is_done
+                                                ? "text-slate-500 line-through"
+                                                : "text-slate-200"
+                                            }`}
+                                          >
+                                            {subtask.title}
+                                          </p>
+                                          {subtask.description && (
+                                            <p
+                                              className="mt-0.5 truncate text-xs text-slate-500"
+                                              title={subtask.description}
+                                            >
+                                              {subtask.description}
+                                            </p>
+                                          )}
+                                        </div>
+                                        <button
+                                          className={`${buttonClassName} shrink-0 border border-purple-300/25 bg-purple-500/10 px-2.5 py-1 text-xs text-purple-100 hover:bg-purple-500/20`}
+                                          disabled={
+                                            isSubtaskBusy ||
+                                            editingSubtaskKey !== null
+                                          }
+                                          onClick={() =>
+                                            startEditingSubtask(task, subtask)
+                                          }
+                                          type="button"
+                                        >
+                                          编辑
+                                        </button>
+                                        <button
+                                          className={`${buttonClassName} shrink-0 border border-red-400/30 bg-red-500/10 px-2.5 py-1 text-xs text-red-200 hover:bg-red-500/20`}
+                                          disabled={isSubtaskBusy}
+                                          onClick={() =>
+                                            void deleteSubtask(task, subtask)
+                                          }
+                                          type="button"
+                                        >
+                                          {isSubtaskBusy ? "处理中…" : "删除"}
+                                        </button>
+                                      </>
+                                    )}
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+
+                          <form
+                            className="mt-4 flex flex-col gap-2 sm:flex-row"
+                            onSubmit={(event) => {
+                              event.preventDefault();
+                              void addSubtask(task);
+                            }}
+                          >
+                            <label
+                              className="sr-only"
+                              htmlFor={`subtask-${taskKey}`}
+                            >
+                              添加子任务标题
+                            </label>
+                            <input
+                              className={`${inputClassName} min-w-0 flex-1`}
+                              disabled={addingSubtaskTaskIds.has(taskKey)}
+                              id={`subtask-${taskKey}`}
+                              maxLength={200}
+                              onChange={(event) =>
+                                setSubtaskDrafts((current) => ({
+                                  ...current,
+                                  [taskKey]: event.target.value,
+                                }))
+                              }
+                              placeholder="输入子任务标题"
+                              value={subtaskDrafts[taskKey] ?? ""}
+                            />
+                            <button
+                              className={`${buttonClassName} w-full bg-gradient-to-r from-purple-500 to-pink-500 px-4 text-white shadow-[0_0_15px_rgba(217,70,239,0.2)] hover:shadow-[0_0_22px_rgba(217,70,239,0.35)] sm:w-auto`}
+                              disabled={addingSubtaskTaskIds.has(taskKey)}
+                              type="submit"
+                            >
+                              {addingSubtaskTaskIds.has(taskKey)
+                                ? "正在添加…"
+                                : "添加"}
+                            </button>
+                          </form>
+                        </div>
+                      )}
+                    </div>
 
                     <div className="mt-5 flex flex-col-reverse gap-2 border-t border-white/10 pt-4 sm:flex-row sm:justify-end">
                       <button
